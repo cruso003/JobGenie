@@ -5,127 +5,164 @@ import { useAuthStore } from './auth';
 
 export interface Document {
   id: string;
+  user_id: string;
   title: string;
   document_type: 'resume' | 'cover_letter';
-  content?: string;
-  file_url?: string;
+  content: string;
+  target_job_id?: string;
   created_at: string;
   updated_at: string;
-  target_job_id?: string;
 }
 
-interface DocumentsState {
+interface DocumentsStore {
   documents: Document[];
-  isLoading: boolean;
+  loading: boolean;
+  error: string | null;
   fetchDocuments: () => Promise<void>;
-  createDocument: (doc: Omit<Document, 'id' | 'created_at' | 'updated_at'>) => Promise<Document | null>;
-  updateDocument: (id: string, updates: Partial<Document>) => Promise<void>;
-  deleteDocument: (id: string) => Promise<void>;
+  getDocumentById: (id: string) => Promise<Document | null>;
+  createDocument: (data: Partial<Document>) => Promise<Document | null>;
+  updateDocument: (id: string, data: Partial<Document>) => Promise<Document | null>;
+  deleteDocument: (id: string) => Promise<boolean>;
 }
 
-export const useDocumentsStore = create<DocumentsState>((set, get) => ({
+export const useDocumentsStore = create<DocumentsStore>((set, get) => ({
   documents: [],
-  isLoading: false,
+  loading: false,
+  error: null,
   
   fetchDocuments: async () => {
-    const user = useAuthStore.getState().user;
+    const { user } = useAuthStore.getState();
     if (!user) return;
     
     try {
-      set({ isLoading: true });
+      set({ loading: true, error: null });
       
       const { data, error } = await supabase
         .from('documents')
         .select('*')
         .eq('user_id', user.id)
-        .order('updated_at', { ascending: false });
+        .order('created_at', { ascending: false });
       
       if (error) throw error;
       
-      set({ documents: data || [] });
+      set({ documents: data || [], loading: false });
     } catch (error) {
       console.error('Error fetching documents:', error);
-    } finally {
-      set({ isLoading: false });
+      set({ error: 'Failed to fetch documents', loading: false });
     }
   },
   
-  createDocument: async (doc) => {
-    const user = useAuthStore.getState().user;
+  getDocumentById: async (id: string) => {
+    const { user } = useAuthStore.getState();
     if (!user) return null;
     
     try {
-      set({ isLoading: true });
+      const { data, error } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .single();
       
-      const now = new Date().toISOString();
+      if (error) throw error;
+      
+      return data;
+    } catch (error) {
+      console.error('Error fetching document by ID:', error);
+      set({ error: 'Failed to fetch document' });
+      return null;
+    }
+  },
+  
+  createDocument: async (documentData: Partial<Document>) => {
+    const { user } = useAuthStore.getState();
+    if (!user) return null;
+    
+    try {
       const newDocument = {
-        ...doc,
         user_id: user.id,
-        created_at: now,
-        updated_at: now
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...documentData,
       };
       
       const { data, error } = await supabase
         .from('documents')
-        .insert([newDocument])
+        .insert(newDocument)
         .select()
         .single();
       
       if (error) throw error;
       
-      set(state => ({
-        documents: [data, ...state.documents]
+      // Update local state
+      set(state => ({ 
+        documents: [data, ...state.documents] 
       }));
       
       return data;
     } catch (error) {
       console.error('Error creating document:', error);
+      set({ error: 'Failed to create document' });
       return null;
-    } finally {
-      set({ isLoading: false });
     }
   },
   
-  updateDocument: async (id, updates) => {
+  updateDocument: async (id: string, documentData: Partial<Document>) => {
+    const { user } = useAuthStore.getState();
+    if (!user) return null;
+    
     try {
-      set({ isLoading: true });
-      
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('documents')
         .update({
-          ...updates,
-          updated_at: new Date().toISOString()
+          ...documentData,
+          updated_at: new Date().toISOString(),
         })
-        .eq('id', id);
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select()
+        .single();
       
       if (error) throw error;
       
+      // Update local state
       set(state => ({
         documents: state.documents.map(doc => 
-          doc.id === id ? { ...doc, ...updates } : doc
+          doc.id === id ? { ...doc, ...data } : doc
         )
       }));
+      
+      return data;
     } catch (error) {
       console.error('Error updating document:', error);
-    } finally {
-      set({ isLoading: false });
+      set({ error: 'Failed to update document' });
+      return null;
     }
   },
   
-  deleteDocument: async (id) => {
+  deleteDocument: async (id: string) => {
+    const { user } = useAuthStore.getState();
+    if (!user) return false;
+    
     try {
       const { error } = await supabase
         .from('documents')
         .delete()
-        .eq('id', id);
+        .eq('id', id)
+        .eq('user_id', user.id);
       
       if (error) throw error;
       
+      // Update local state
       set(state => ({
         documents: state.documents.filter(doc => doc.id !== id)
       }));
+      
+      return true;
     } catch (error) {
       console.error('Error deleting document:', error);
+      set({ error: 'Failed to delete document' });
+      return false;
     }
-  }
+  },
 }));

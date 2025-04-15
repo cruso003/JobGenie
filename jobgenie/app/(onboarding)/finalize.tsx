@@ -6,13 +6,14 @@ import {
   TouchableOpacity, 
   ScrollView,
   ActivityIndicator,
+  FlatList,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { MotiView } from 'moti';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import LottieView from 'lottie-react-native';
-import { suggestJobRoles, recommendSkillsToLearn } from '@/utils/gemini';
+import { suggestJobRoles, recommendSkillsToLearn, calculateJobMatch } from '@/utils/gemini'; // Added calculateJobMatch
 import { searchJobs } from '@/utils/jsearch';
 import { useAuthStore } from '@/stores/auth';
 import { supabase } from '@/utils/supabase';
@@ -47,9 +48,8 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
   const [personalizedRecommendations, setPersonalizedRecommendations] = useState<string[]>([]);
   const [animationComplete, setAnimationComplete] = useState(false);
   const { user } = useAuthStore();
-  const [firstJobMatch, setFirstJobMatch] = useState<any>(null);
+  const [jobMatches, setJobMatches] = useState<any[]>([]); // Store multiple job matches
   const [skillSuggestions, setSkillSuggestions] = useState<any[]>([]);
-  const [salaryRange, setSalaryRange] = useState<string | null>(null); // State to store salary range
 
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
@@ -71,7 +71,7 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
         const jobSuggestions = await suggestJobRoles({
           skills: profileData.skills,
           experience: profileData.experience,
-          interests: profileData.interests
+          interests: profileData.interests,
         });
         
         if (jobSuggestions && jobSuggestions.length > 0) {
@@ -91,7 +91,7 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
           
           try {
             const searchQuery = `${firstJob.title} ${profileData.jobType === 'remote' ? 'remote' : ''} ${profileData.location || ''}`.trim();
-            const jobResults = await searchJobs(searchQuery, 1, 1);
+            const jobResults = await searchJobs(searchQuery, 1, 5);
             
             if (jobResults && jobResults.data && jobResults.data.length > 0) {
               const jobCount = jobResults.total || jobResults.data.length;
@@ -99,17 +99,14 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
                 recommendationItems.push(`We found ${jobCount} ${firstJob.title} jobs that match your profile`);
               }
               
-              const jobMatch = jobResults.data[0];
-              setFirstJobMatch(jobMatch);
-
-              // Extract salary range from the job match
-              if (jobMatch.job_min_salary && jobMatch.job_max_salary && jobMatch.job_salary_period) {
-                const salaryRangeText = `${jobMatch.job_min_salary} - ${jobMatch.job_max_salary} per ${jobMatch.job_salary_period.toLowerCase()}`;
-                setSalaryRange(salaryRangeText);
-                recommendationItems.push(`Estimated salary for ${firstJob.title}: ${salaryRangeText}`);
-              } else {
-                setSalaryRange(null);
-              }
+              const sortedJobs = jobResults.data.sort((a: any, b: any) => {
+                const hasSalaryA = a.job_min_salary && a.job_max_salary && a.job_salary_period;
+                const hasSalaryB = b.job_min_salary && b.job_max_salary && b.job_salary_period;
+                return hasSalaryB ? 1 : hasSalaryA ? -1 : 0;
+              });
+              
+              const topJobs = sortedJobs.slice(0, 3);
+              setJobMatches(topJobs);
             }
           } catch (error) {
             console.error('Error searching jobs:', error);
@@ -152,10 +149,18 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
   
   const handleCompleteOnboarding = async () => {
     if (!user) return;
-    
+  
     setLoading(true);
-    
+  
     try {
+      // Prepare profile data for Gemini API
+      const profileForGemini = {
+        skills: profileData.skills || [],
+        experience: profileData.experience || { level: 'beginner', yearsOfExperience: 0 },
+        interests: profileData.interests || [],
+      };
+  
+      // Save skill recommendations
       if (skillSuggestions && skillSuggestions.length > 0) {
         for (const skill of skillSuggestions.slice(0, 3)) {
           await supabase
@@ -168,23 +173,70 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
             });
         }
       }
-      
-      if (firstJobMatch) {
-        await supabase
-          .from('saved_jobs')
-          .insert({
-            user_id: user.id,
-            job_title: firstJobMatch.job_title || 'Job Opportunity',
-            company_name: firstJobMatch.employer_name || '',
-            job_description: firstJobMatch.job_description || '',
-            job_location: firstJobMatch.job_city || profileData.location || 'Remote',
-            salary_range: salaryRange || 'Not available', // Save the salary range
-            application_link: firstJobMatch.job_apply_link || '',
-            external_job_id: firstJobMatch.job_id || '',
-            status: 'recommended'
-          });
+  
+      // Save up to 3 job matches with match percentages
+      if (jobMatches.length > 0) {
+        for (const jobMatch of jobMatches) {
+          let salaryRange = "Not specified";
+  
+          // Check if job_min_salary and job_max_salary are available
+          if (jobMatch.job_min_salary && jobMatch.job_max_salary) {
+            salaryRange = `$${jobMatch.job_min_salary.toLocaleString()} - $${jobMatch.job_max_salary.toLocaleString()}`;
+          } else if (jobMatch.job_description) {
+            // Try to extract a salary range from job_description
+            const rangeRegex = /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?-\s?(?:\$|USD)?\s?(\d{1,3}(?:,\d{3})*)/i;
+            const rangeMatch = jobMatch.job_description.match(rangeRegex);
+            if (rangeMatch) {
+              const minSalary = parseInt(rangeMatch[1].replace(/,/g, ''), 10);
+              const maxSalary = parseInt(rangeMatch[2].replace(/,/g, ''), 10);
+              salaryRange = `$${minSalary.toLocaleString()} - $${maxSalary.toLocaleString()}`;
+            } else {
+              // Try to extract a single salary
+              const singleRegex = /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?(?!\s?-\s?(?:\$|USD)?\s?\d{1,3}(?:,\d{3})*)/i;
+              const singleMatch = jobMatch.job_description.match(singleRegex);
+              if (singleMatch) {
+                const salary = parseInt(singleMatch[1].replace(/,/g, ''), 10);
+                salaryRange = `$${salary.toLocaleString()}`;
+              }
+            }
+          }
+  
+          // Calculate match percentage using Gemini
+          let matchPercentage = 85; // Default fallback
+          let matchReasoning = 'Based on your skills and experience'; // Default fallback
+  
+          try {
+            const match = await calculateJobMatch(
+              jobMatch.job_title,
+              jobMatch.job_description || '',
+              profileForGemini
+            );
+            matchPercentage = match.percentage;
+            matchReasoning = match.reasoning;
+          } catch (error) {
+            console.error(`Error calculating match for job ${jobMatch.job_title}:`, error);
+          }
+  
+          await supabase
+            .from('saved_jobs')
+            .insert({
+              user_id: user.id,
+              job_title: jobMatch.job_title || 'Job Opportunity',
+              company_name: jobMatch.employer_name || '',
+              job_description: jobMatch.job_description || '',
+              job_location: jobMatch.job_city || profileData.location || 'Remote',
+              salary_range: salaryRange,
+              application_link: jobMatch.job_apply_link || '',
+              external_job_id: jobMatch.job_id || '',
+              status: 'recommended',
+              match_percentage: matchPercentage,
+              match_reasoning: matchReasoning,
+              last_match_update: new Date().toISOString(),
+            });
+        }
       }
-      
+  
+      // Save general recommendations
       for (const recommendation of personalizedRecommendations) {
         await supabase
           .from('recommendations')
@@ -195,7 +247,7 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
             description: ''
           });
       }
-      
+  
       onComplete({ onboarded: true });
     } catch (error) {
       console.error('Error saving recommendations:', error);
@@ -203,6 +255,55 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
     } finally {
       setLoading(false);
     }
+  };
+
+  const renderJobMatch = ({ item }: { item: any }) => {
+    const formatSalary = () => {
+      // Check for job_min_salary and job_max_salary
+      if (item.job_min_salary && item.job_max_salary) {
+        return `$${item.job_min_salary.toLocaleString()} - $${item.job_max_salary.toLocaleString()}`;
+      }
+  
+      // Try to extract salary from job_description
+      if (item.job_description) {
+        // Check for a salary range (e.g., "$140,000 - $200,000")
+        const rangeRegex = /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?-\s?(?:\$|USD)?\s?(\d{1,3}(?:,\d{3})*)/i;
+        const rangeMatch = item.job_description.match(rangeRegex);
+        if (rangeMatch) {
+          const minSalary = parseInt(rangeMatch[1].replace(/,/g, ''), 10);
+          const maxSalary = parseInt(rangeMatch[2].replace(/,/g, ''), 10);
+          return `$${minSalary.toLocaleString()} - $${maxSalary.toLocaleString()}`;
+        }
+  
+        // Check for a single salary (e.g., "Salary 140,000 annually")
+        const singleRegex = /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?(?!\s?-\s?(?:\$|USD)?\s?\d{1,3}(?:,\d{3})*)/i;
+        const singleMatch = item.job_description.match(singleRegex);
+        if (singleMatch) {
+          const salary = parseInt(singleMatch[1].replace(/,/g, ''), 10);
+          return `$${salary.toLocaleString()}`;
+        }
+      }
+  
+      // Fallback
+      return "Not specified";
+    };
+  
+    return (
+      <View style={[styles.card, { backgroundColor: cardBgColor, borderColor, marginBottom: 16 }]}>
+        <Text style={[styles.jobTitle, { color: textColor }]}>
+          {item.job_title}
+        </Text>
+        <Text style={[styles.jobMeta, { color: isDark ? '#D1D5DB' : '#4B5563' }]}>
+          {item.employer_name} • {item.job_city || 'Remote'}
+        </Text>
+        <View style={styles.jobDetail}>
+          <Feather name="dollar-sign" size={16} color="#6366F1" style={styles.jobDetailIcon} />
+          <Text style={[styles.jobDetailText, { color: textColor }]}>
+            Salary Range: {formatSalary()}
+          </Text>
+        </View>
+      </View>
+    );
   };
   
   return (
@@ -304,24 +405,18 @@ export default function FinalizeScreen({ profileData, onComplete, onBack }: Prop
             </View>
           </View>
           
-          {/* Job Match Section */}
-          {firstJobMatch && (
-            <View style={[styles.card, { backgroundColor: cardBgColor, borderColor, marginBottom: 28 }]}>
+          {/* Job Matches Section */}
+          {jobMatches.length > 0 && (
+            <View style={[styles.jobMatchesSection, { marginBottom: 28 }]}>
               <Text style={[styles.sectionTitle, { color: textColor }]}>
-                Top Job Match
+                Top Job Matches
               </Text>
-              <Text style={[styles.jobTitle, { color: textColor }]}>
-                {firstJobMatch.job_title}
-              </Text>
-              <Text style={[styles.jobMeta, { color: isDark ? '#D1D5DB' : '#4B5563' }]}>
-                {firstJobMatch.employer_name} • {firstJobMatch.job_city || 'Remote'}
-              </Text>
-              <View style={styles.jobDetail}>
-                <Feather name="dollar-sign" size={16} color="#6366F1" style={styles.jobDetailIcon} />
-                <Text style={[styles.jobDetailText, { color: textColor }]}>
-                  Salary Range: {salaryRange || 'Not available'}
-                </Text>
-              </View>
+              <FlatList
+                data={jobMatches}
+                renderItem={renderJobMatch}
+                keyExtractor={(item) => item.job_id || item.job_title}
+                scrollEnabled={false}
+              />
             </View>
           )}
           
@@ -437,7 +532,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
     borderWidth: 1,
-    marginBottom: 28,
+    marginBottom: 16,
   },
   profileHeader: {
     flexDirection: 'row',
@@ -506,6 +601,9 @@ const styles = StyleSheet.create({
     color: '#6366F1',
     fontSize: 13,
     fontWeight: '500',
+  },
+  jobMatchesSection: {
+    marginBottom: 28,
   },
   jobTitle: {
     fontSize: 18,

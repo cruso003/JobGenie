@@ -12,6 +12,7 @@ import "react-native-reanimated";
 import "../global.css";
 
 import { useColorScheme } from "@/hooks/useColorScheme";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
@@ -34,6 +35,7 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+      <GestureHandlerRootView style={{ flex: 1 }}>
       <Stack>
         <Stack.Screen
           name="(auth)"
@@ -43,9 +45,17 @@ export default function RootLayout() {
         />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="(onboarding)" options={{ headerShown: false }} />
+        <Stack.Screen name="genie/interview" options={{ headerShown: false }} />
+        <Stack.Screen name="terms-privacy/index" options={{ headerShown: false }} />
+        <Stack.Screen name="edit-profile/index" options={{ headerShown: false }} />
+        <Stack.Screen name="job-details/index" options={{ headerShown: false }} />
+        <Stack.Screen name="saved-jobs/index" options={{ headerShown: false }} />
+        <Stack.Screen name="skills/index" options={{ headerShown: false }} />
+        <Stack.Screen name="skills/video/[videoId]" options={{ headerShown: false }} />
+        <Stack.Screen name="applications/index" options={{ headerShown: false }} />
         <Stack.Screen name="+not-found" />
       </Stack>
-      <StatusBar style="auto" />
+      <StatusBar style="auto" /></GestureHandlerRootView>
     </ThemeProvider>
   );
 }

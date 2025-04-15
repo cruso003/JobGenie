@@ -6,7 +6,8 @@ import { useAuthStore } from './auth';
 export type ExperienceLevel = 'beginner' | 'intermediate' | 'advanced';
 
 export interface ProfileData {
-  fullName: string;
+  id: string;
+  full_name: string;
   location: string;
   jobType: string;
   skills: string[];
@@ -35,7 +36,8 @@ interface ProfileState {
 }
 
 const initialProfileState: ProfileData = {
-  fullName: '',
+  id: '',
+  full_name: '',
   location: '',
   jobType: '',
   skills: [],
@@ -102,7 +104,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         .from('profiles')
         .upsert({
           id: user.id,
-          full_name: updatedProfile.fullName,
+          full_name: updatedProfile.full_name,
           experience: JSON.stringify(updatedProfile.experience),
           skills: updatedProfile.skills,
           interests: updatedProfile.interests,

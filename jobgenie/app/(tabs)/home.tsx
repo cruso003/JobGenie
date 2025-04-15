@@ -6,9 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  TextInput,
-  Modal,
-  Pressable,
 } from "react-native";
 import { useColorScheme } from "@/hooks/useColorScheme";
 import { LinearGradient } from "expo-linear-gradient";
@@ -16,39 +13,32 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useAuthStore } from "@/stores/auth";
 import { supabase } from "@/utils/supabase";
-import { suggestJobRoles, recommendSkillsToLearn } from "@/utils/gemini";
+import {
+  suggestJobRoles,
+  recommendSkillsToLearn,
+  calculateJobMatch,
+} from "@/utils/gemini";
 import { searchJobs } from "@/utils/jsearch";
 import LottieView from "lottie-react-native";
-
-interface JobSuggestion {
-  title: string;
-  reason: string;
-}
-
-interface JobRecommendation {
-  job_title: string;
-  employer_name: string;
-  job_description: string;
-  job_apply_link: string;
-  job_city: string;
-  job_min_salary?: number | null;
-  job_max_salary?: number | null;
-  job_salary_period?: string | null;
-}
+import LoadingIndicator from "@/components/ui/LoadingIndicator";
+import ProfileSummaryCard from "@/components/home/ProfileSummaryCard";
+import SkillSuggestionCard from "@/components/home/SkillSuggestionCard";
+import JobCard from "@/components/home/JobCard";
+import { RecommendedJob, useJobsStore } from "@/stores/jobs";
+import { differenceInHours } from "date-fns";
 
 export default function HomeScreen() {
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [jobRecommendations, setJobRecommendations] = useState<any[]>([]);
-  const [savedJobs, setSavedJobs] = useState<any[]>([]);
-  const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [refreshingJobs, setRefreshingJobs] = useState(false);
   const [careerTip, setCareerTip] = useState("");
   const [skillSuggestions, setSkillSuggestions] = useState<any[]>([]);
-  const [geniePrompt, setGeniePrompt] = useState("");
-  const [selectedJob, setSelectedJob] = useState<any | null>(null);
-  const [modalVisible, setModalVisible] = useState(false);
+  const [profileCompleteness, setProfileCompleteness] = useState(0);
+  const [recalculatingMatches, setRecalculatingMatches] = useState(false);
 
   const { user } = useAuthStore();
+  const { savedJobs, fetchSavedJobs, saveJob } = useJobsStore();
   const router = useRouter();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
@@ -62,33 +52,8 @@ export default function HomeScreen() {
   const loadSavedData = async () => {
     try {
       setLoading(true);
-
-      const { data: jobData, error: jobError } = await supabase
-        .from("saved_jobs")
-        .select("*")
-        .eq("user_id", user?.id)
-        .order("saved_at", { ascending: false });
-
-      if (!jobError && jobData) {
-        setSavedJobs(jobData);
-      }
-
-      const { data: recData, error: recError } = await supabase
-        .from("recommendations")
-        .select("*")
-        .eq("user_id", user?.id)
-        .order("created_at", { ascending: false });
-
-      if (!recError && recData) {
-        setRecommendations(recData);
-      }
-
-      if (
-        (!jobData || jobData.length === 0) &&
-        (!recData || recData.length === 0)
-      ) {
-        await generateNewRecommendations();
-      }
+      await fetchUserProfile();
+      await fetchSavedJobs();
     } catch (error) {
       console.error("Error loading saved data:", error);
     } finally {
@@ -96,20 +61,10 @@ export default function HomeScreen() {
     }
   };
 
-  const generateNewRecommendations = async () => {
-    // Use profile data to generate new recommendations
-  };
-
-  useEffect(() => {
-    fetchUserProfile();
-  }, []);
-
   const fetchUserProfile = async () => {
     if (!user) return;
 
     try {
-      setLoading(true);
-
       const { data, error } = await supabase
         .from("profiles")
         .select("*")
@@ -120,7 +75,27 @@ export default function HomeScreen() {
 
       setProfile(data);
 
-      fetchJobRecommendations(data);
+      const requiredFields = [
+        "full_name",
+        "location",
+        "job_type",
+        "skills",
+        "experience",
+        "interests",
+        "goals",
+      ];
+      const completedFields = requiredFields.filter((field) => {
+        if (Array.isArray(data[field])) {
+          return data[field].length > 0;
+        }
+        return data[field] != null && data[field] !== "";
+      });
+
+      const completeness = Math.round(
+        (completedFields.length / requiredFields.length) * 100
+      );
+      setProfileCompleteness(completeness);
+
       fetchSkillSuggestions(data);
 
       const tips = [
@@ -132,13 +107,158 @@ export default function HomeScreen() {
       setCareerTip(tips[Math.floor(Math.random() * tips.length)]);
     } catch (error) {
       console.error("Error fetching profile:", error);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const fetchJobRecommendations = async (profile: any) => {
+  const handleRefreshJobs = async () => {
     if (!profile) return;
+
+    try {
+      setRefreshingJobs(true);
+      await fetchJobRecommendations(profile, true);
+    } catch (error) {
+      console.error("Error refreshing jobs:", error);
+    } finally {
+      setRefreshingJobs(false);
+    }
+  };
+
+  useEffect(() => {
+    const { recommendedJobs, lastRecommendationFetch } =
+      useJobsStore.getState();
+
+    if (recommendedJobs.length > 0 && lastRecommendationFetch) {
+      const hoursSinceLastFetch = differenceInHours(
+        new Date(),
+        new Date(lastRecommendationFetch)
+      );
+
+      if (hoursSinceLastFetch < 24) {
+        const savedJobIds = savedJobs.map((job) => job.external_job_id);
+        const filteredRecommendations = recommendedJobs.filter(
+          (job) => !savedJobIds.includes(job.job_id)
+        );
+
+        setJobRecommendations(filteredRecommendations);
+      }
+    }
+  }, [savedJobs]);
+
+  const recalculateJobMatches = async () => {
+    const { user } = useAuthStore.getState();
+    if (!user) return;
+
+    try {
+      setRecalculatingMatches(true);
+
+      const { data: profileData } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+
+      if (!profileData) throw new Error("Profile not found");
+
+      const profile = {
+        skills: profileData.skills || [],
+        experience:
+          typeof profileData.experience === "string"
+            ? JSON.parse(profileData.experience)
+            : profileData.experience || {
+                level: "beginner",
+                yearsOfExperience: 0,
+              },
+        interests: profileData.interests || [],
+      };
+
+      const { data: jobs } = await supabase
+        .from("saved_jobs")
+        .select("*")
+        .eq("user_id", user.id);
+
+      if (!jobs || jobs.length === 0) {
+        alert("No saved jobs to recalculate.");
+        return;
+      }
+
+      const batchSize = 3;
+      let updatedCount = 0;
+
+      for (let i = 0; i < jobs.length; i += batchSize) {
+        const batch = jobs.slice(i, i + batchSize);
+
+        await Promise.all(
+          batch.map(async (job) => {
+            try {
+              const match = await calculateJobMatch(
+                job.job_title,
+                job.job_description || "",
+                profile
+              );
+
+              await supabase
+                .from("saved_jobs")
+                .update({
+                  match_percentage: match.percentage,
+                  match_reasoning: match.reasoning,
+                  last_match_update: new Date().toISOString(),
+                })
+                .eq("id", job.id);
+
+              updatedCount++;
+            } catch (e) {
+              console.error(`Failed to update job ${job.id}:`, e);
+            }
+          })
+        );
+
+        if (i + batchSize < jobs.length) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+
+      await fetchSavedJobs();
+
+      alert(
+        `Updated matches for ${updatedCount} jobs based on your current profile.`
+      );
+    } catch (error) {
+      console.error("Error recalculating job matches:", error);
+      alert(
+        "There was an error updating your job matches. Please try again later."
+      );
+    } finally {
+      setRecalculatingMatches(false);
+    }
+  };
+
+  const fetchJobRecommendations = async (
+    profile: any,
+    forceRefresh = false
+  ) => {
+    if (!profile) return;
+
+    const { recommendedJobs, lastRecommendationFetch, savedJobs } =
+      useJobsStore.getState();
+    if (
+      !forceRefresh &&
+      recommendedJobs.length > 0 &&
+      lastRecommendationFetch
+    ) {
+      const hoursSinceLastFetch = differenceInHours(
+        new Date(),
+        new Date(lastRecommendationFetch)
+      );
+      if (hoursSinceLastFetch < 24) {
+        const savedJobIds = savedJobs.map((job) => job.external_job_id);
+        const filteredRecommendations = recommendedJobs.filter(
+          (job) => !savedJobIds.includes(job.job_id)
+        );
+
+        setJobRecommendations(filteredRecommendations);
+        return;
+      }
+    }
 
     try {
       const profileData = {
@@ -162,31 +282,92 @@ export default function HomeScreen() {
           const jobResults = await searchJobs(searchQuery, 1, 3);
 
           if (jobResults && jobResults.data && jobResults.data.length > 0) {
-            setJobRecommendations(jobResults.data);
+            const jobsWithMatches = await Promise.all(
+              jobResults.data.map(async (job: any, index: number) => {
+                try {
+                  if (index === 0) {
+                    const match = await calculateJobMatch(
+                      job.job_title,
+                      job.job_description || "",
+                      profileData
+                    );
+
+                    return {
+                      ...job,
+                      match_percentage: match.percentage,
+                      match_reasoning: match.reasoning,
+                    };
+                  } else {
+                    return {
+                      ...job,
+                      match_percentage: 90 - index * 5,
+                      match_reasoning: "Based on your skills and experience",
+                    };
+                  }
+                } catch (e) {
+                  console.error("Error calculating job match:", e);
+                  return {
+                    ...job,
+                    match_percentage: 85 - index * 5,
+                    match_reasoning: "Based on your skills and experience",
+                  };
+                }
+              })
+            );
+
+            const savedJobIds = savedJobs.map((job) => job.external_job_id);
+            const filteredJobs = jobsWithMatches.filter(
+              (job) => !savedJobIds.includes(job.job_id)
+            );
+
+            useJobsStore.getState().setRecommendedJobs(jobsWithMatches);
+            setJobRecommendations(filteredJobs);
           } else {
-            setJobRecommendations([
-              {
-                job_title: firstJob.title,
-                employer_name: "Various Companies",
-                job_description: `Based on your profile, we recommend exploring ${firstJob.title} roles. ${firstJob.reason}`,
-                job_apply_link: "#",
-                job_city: profile.location || "Remote",
-              },
-            ]);
-          }
-        } catch (error) {
-          console.error("Error searching jobs:", error);
-          setJobRecommendations(
-            jobSuggestions.slice(0, 3).map(
-              (job: JobSuggestion): JobRecommendation => ({
+            const placeholderJobs = jobSuggestions
+              .slice(0, 3)
+              .map((job: any, index: number) => ({
+                job_id: `suggestion-${index}`,
                 job_title: job.title,
                 employer_name: "Recommended Role",
                 job_description: job.reason,
                 job_apply_link: "#",
                 job_city: profile.location || "Remote",
-              })
-            )
+                job_country: "United States",
+                match_percentage: 95 - index * 5,
+              }));
+
+            useJobsStore.getState().setRecommendedJobs(placeholderJobs);
+
+            const savedJobIds = savedJobs.map((job) => job.external_job_id);
+            const filteredJobs: RecommendedJob[] = placeholderJobs.filter(
+              (job: RecommendedJob) => !savedJobIds.includes(job.job_id)
+            );
+
+            setJobRecommendations(filteredJobs);
+          }
+        } catch (error) {
+          console.error("Error searching jobs:", error);
+          const placeholderJobs = jobSuggestions
+            .slice(0, 3)
+            .map((job: any, index: number) => ({
+              job_id: `suggestion-${index}`,
+              job_title: job.title,
+              employer_name: "Recommended Role",
+              job_description: job.reason,
+              job_apply_link: "#",
+              job_city: profile.location || "Remote",
+              job_country: "United States",
+              match_percentage: 95 - index * 5,
+            }));
+
+          useJobsStore.getState().setRecommendedJobs(placeholderJobs);
+
+          const savedJobIds = savedJobs.map((job) => job.external_job_id);
+          const filteredJobs: RecommendedJob[] = placeholderJobs.filter(
+            (job: RecommendedJob) => !savedJobIds.includes(job.job_id)
           );
+
+          setJobRecommendations(filteredJobs);
         }
       }
     } catch (error) {
@@ -198,6 +379,26 @@ export default function HomeScreen() {
     if (!profile) return;
 
     try {
+      // First, check if we have stored recommendations in the database
+      const { data: existingRecommendations } = await supabase
+        .from("recommendations")
+        .select("*")
+        .eq("user_id", user?.id)
+        .eq("type", "skill");
+
+      if (existingRecommendations && existingRecommendations.length > 0) {
+        // If we have stored recommendations, use those
+        const formattedRecommendations = existingRecommendations.map((rec) => ({
+          skill: rec.title,
+          reason: rec.description,
+          resource: rec.resource_link || "Online tutorials and documentation",
+        }));
+
+        setSkillSuggestions(formattedRecommendations.slice(0, 10));
+        return;
+      }
+
+      // If no stored recommendations, generate new ones
       const profileData = {
         skills: profile.skills || [],
         experience:
@@ -214,8 +415,23 @@ export default function HomeScreen() {
           firstJob.title,
           profile.skills
         );
+
         if (skillRecommendations && skillRecommendations.length > 0) {
-          setSkillSuggestions(skillRecommendations.slice(0, 3));
+          // Store these recommendations in the database for future use
+          const recommendationsToStore = skillRecommendations.map(
+            (skill: any) => ({
+              user_id: user?.id,
+              type: "skill",
+              title: skill.skill,
+              description: skill.reason,
+              resource_link: skill.resource,
+              created_at: new Date().toISOString(),
+            })
+          );
+
+          await supabase.from("recommendations").insert(recommendationsToStore);
+
+          setSkillSuggestions(skillRecommendations.slice(0, 10));
         }
       }
     } catch (error) {
@@ -223,74 +439,58 @@ export default function HomeScreen() {
     }
   };
 
-  const handleGeniePromptSubmit = () => {
-    if (geniePrompt.trim()) {
-      router.push({
-        pathname: "/(tabs)/genie",
-        params: { prompt: geniePrompt },
+  const handleSaveJob = async (job: any) => {
+    try {
+      let salaryRange = "Not specified";
+
+      if (job.job_min_salary && job.job_max_salary) {
+        salaryRange = `$${job.job_min_salary.toLocaleString()} - $${job.job_max_salary.toLocaleString()}`;
+      } else if (job.job_description) {
+        const rangeRegex =
+          /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?-\s?(?:\$|USD)?\s?(\d{1,3}(?:,\d{3})*)/i;
+        const rangeMatch = job.job_description.match(rangeRegex);
+        if (rangeMatch) {
+          const minSalary = parseInt(rangeMatch[1].replace(/,/g, ""), 10);
+          const maxSalary = parseInt(rangeMatch[2].replace(/,/g, ""), 10);
+          salaryRange = `$${minSalary.toLocaleString()} - $${maxSalary.toLocaleString()}`;
+        } else {
+          const singleRegex =
+            /(?:\$|USD)\s?(\d{1,3}(?:,\d{3})*)\s?(?!\s?-\s?(?:\$|USD)?\s?\d{1,3}(?:,\d{3})*)/i;
+          const singleMatch = job.job_description.match(singleRegex);
+          if (singleMatch) {
+            const salary = parseInt(singleMatch[1].replace(/,/g, ""), 10);
+            salaryRange = `$${salary.toLocaleString()}`;
+          }
+        }
+      }
+
+      await saveJob({
+        job_title: job.job_title,
+        company_name: job.employer_name,
+        job_description: job.job_description,
+        job_location: job.job_city || "Remote",
+        salary_range: salaryRange,
+        application_link: job.job_apply_link,
+        job_source: "JSearch",
+        external_job_id: job.job_id || `jobgenie-${Date.now()}`,
+        status: "saved",
+        match_percentage: job.match_percentage,
+        match_reasoning: job.match_reasoning,
       });
+
+      setJobRecommendations((currentJobs) =>
+        currentJobs.filter((rec) => rec.job_id !== job.job_id)
+      );
+
+      alert("Job saved successfully!");
+    } catch (error) {
+      console.error("Error saving job:", error);
+      alert("Failed to save job. Please try again.");
     }
-  };
-
-  const openJobDetails = (job: any) => {
-    setSelectedJob(job);
-    setModalVisible(true);
-  };
-
-  const closeJobDetails = () => {
-    setModalVisible(false);
-    setSelectedJob(null);
-  };
-
-  const handleTailoredResume = (job: any) => {
-    router.push({
-      pathname: "/(tabs)/resume",
-      params: { jobTitle: job.job_title, company: job.employer_name },
-    });
-    closeJobDetails();
-  };
-
-  const handleCreateCoverLetter = (job: any) => {
-    router.push({
-      pathname: "/(tabs)/resume",
-      params: {
-        jobTitle: job.job_title,
-        company: job.employer_name,
-        action: "cover-letter",
-      },
-    });
-    closeJobDetails();
-  };
-
-  const handlePrepareInterview = (job: any) => {
-    router.push({
-      pathname: "/(tabs)/genie",
-      params: {
-        prompt: `Prepare me for an interview for a ${job.job_title} role at ${job.employer_name}`,
-      },
-    });
-    closeJobDetails();
-  };
-
-  const handleApplyDirectly = (job: any) => {
-    if (job.job_apply_link && job.job_apply_link !== "#") {
-      // In a real app, use Linking.openURL(job.job_apply_link)
-      console.log("Opening application link:", job.job_apply_link);
-    } else {
-      console.log("No application link available");
-    }
-    closeJobDetails();
   };
 
   if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#6366F1" />
-        <Text style={styles.loadingText}>
-          Loading your personalized dashboard...
-        </Text>
-      </View>
-    );
+    return <LoadingIndicator />;
   }
 
   return (
@@ -304,186 +504,6 @@ export default function HomeScreen() {
         colors={isDark ? ["#111827", "#1E3A8A"] : ["#F9FAFB", "#EFF6FF"]}
         style={StyleSheet.absoluteFill}
       />
-
-      {/* Job Details Modal */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={modalVisible}
-        onRequestClose={closeJobDetails}
-      >
-        <View style={styles.modalOverlay}>
-          <View
-            style={[
-              styles.modalContent,
-              {
-                backgroundColor: isDark ? "#1F2937" : "#FFFFFF",
-              },
-            ]}
-          >
-            <View style={styles.modalHeader}>
-              <Text
-                style={[
-                  styles.modalTitle,
-                  { color: isDark ? "#FFFFFF" : "#111827" },
-                ]}
-              >
-                {selectedJob?.job_title || "Job Details"}
-              </Text>
-              <Pressable onPress={closeJobDetails}>
-                <Feather
-                  name="x"
-                  size={24}
-                  color={isDark ? "#FFFFFF" : "#111827"}
-                />
-              </Pressable>
-            </View>
-
-            <ScrollView style={styles.modalScroll}>
-              <Text
-                style={[
-                  styles.modalSubtitle,
-                  { color: isDark ? "#D1D5DB" : "#4B5563" },
-                ]}
-              >
-                {selectedJob?.employer_name || "Unknown Company"}
-              </Text>
-              <Text
-                style={[
-                  styles.modalLocation,
-                  { color: isDark ? "#9CA3AF" : "#6B7280" },
-                ]}
-              >
-                {selectedJob?.job_city || "Remote"}
-              </Text>
-              <View style={styles.modalDetail}>
-                <Feather name="dollar-sign" size={16} color="#6366F1" />
-                <Text
-                  style={[
-                    styles.modalDetailText,
-                    { color: isDark ? "#FFFFFF" : "#111827" },
-                  ]}
-                >
-                  Salary Range:{" "}
-                  {selectedJob?.job_min_salary && selectedJob?.job_max_salary
-                    ? `${selectedJob.job_min_salary} - ${
-                        selectedJob.job_max_salary
-                      } per ${selectedJob.job_salary_period?.toLowerCase()}`
-                    : "Not available"}
-                </Text>
-              </View>
-              <Text
-                style={[
-                  styles.modalSectionTitle,
-                  { color: isDark ? "#FFFFFF" : "#111827" },
-                ]}
-              >
-                Job Description
-              </Text>
-              <Text
-                style={[
-                  styles.modalDescription,
-                  { color: isDark ? "#D1D5DB" : "#4B5563" },
-                ]}
-              >
-                {selectedJob?.job_description || "No description available."}
-              </Text>
-
-              {/* Prepare to Apply Section */}
-              <Text
-                style={[
-                  styles.modalSectionTitle,
-                  { color: isDark ? "#FFFFFF" : "#111827", marginTop: 24 },
-                ]}
-              >
-                Prepare to Apply
-              </Text>
-              <View style={styles.prepareOptions}>
-                <TouchableOpacity
-                  style={[
-                    styles.prepareButton,
-                    {
-                      backgroundColor: isDark
-                        ? "rgba(99, 102, 241, 0.15)"
-                        : "rgba(99, 102, 241, 0.1)",
-                    },
-                  ]}
-                  onPress={() => handleTailoredResume(selectedJob)}
-                >
-                  <Feather name="file-text" size={20} color="#6366F1" />
-                  <Text style={styles.prepareButtonText}>Tailored Resume</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.prepareButton,
-                    {
-                      backgroundColor: isDark
-                        ? "rgba(99, 102, 241, 0.15)"
-                        : "rgba(99, 102, 241, 0.1)",
-                    },
-                  ]}
-                  onPress={() => handleCreateCoverLetter(selectedJob)}
-                >
-                  <Feather name="edit" size={20} color="#6366F1" />
-                  <Text style={styles.prepareButtonText}>
-                    Create Cover Letter
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.prepareButton,
-                    {
-                      backgroundColor: isDark
-                        ? "rgba(99, 102, 241, 0.15)"
-                        : "rgba(99, 102, 241, 0.1)",
-                    },
-                  ]}
-                  onPress={() => handlePrepareInterview(selectedJob)}
-                >
-                  <Feather name="message-circle" size={20} color="#6366F1" />
-                  <Text style={styles.prepareButtonText}>
-                    Prepare for Interview
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.prepareButton, styles.applyDirectButton]}
-                  onPress={() => handleApplyDirectly(selectedJob)}
-                >
-                  <Feather name="check-circle" size={20} color="#FFFFFF" />
-                  <Text
-                    style={[styles.prepareButtonText, { color: "#FFFFFF" }]}
-                  >
-                    Apply Directly
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-
-            <View style={styles.modalFooter}>
-              <TouchableOpacity
-                style={[
-                  styles.modalButton,
-                  {
-                    backgroundColor: isDark
-                      ? "rgba(255,255,255,0.1)"
-                      : "rgba(0,0,0,0.05)",
-                  },
-                ]}
-                onPress={closeJobDetails}
-              >
-                <Text
-                  style={[
-                    styles.modalButtonText,
-                    { color: isDark ? "#FFFFFF" : "#111827" },
-                  ]}
-                >
-                  Close
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       {/* Header */}
       <View style={styles.header}>
@@ -515,6 +535,14 @@ export default function HomeScreen() {
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
       >
+        {/* Profile Summary Card */}
+        <ProfileSummaryCard
+          jobCount={savedJobs.length}
+          skillCount={skillSuggestions.length}
+          profileCompleteness={profileCompleteness}
+          isDark={isDark}
+        />
+
         {/* Quick Actions */}
         <View style={styles.quickActionsContainer}>
           <Text
@@ -610,14 +638,39 @@ export default function HomeScreen() {
 
         {/* Job Recommendations (Horizontal Scroll) */}
         <View style={styles.recommendationsContainer}>
-          <Text
-            style={[
-              styles.sectionTitle,
-              { color: isDark ? "#FFFFFF" : "#111827" },
-            ]}
-          >
-            Recommended Jobs 🎯
-          </Text>
+          <View style={styles.sectionHeaderWithLink}>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Text
+                style={[
+                  styles.sectionTitle,
+                  { color: isDark ? "#FFFFFF" : "#111827", marginBottom: 0 },
+                ]}
+              >
+                Recommended Jobs 🎯
+              </Text>
+              <TouchableOpacity
+                onPress={handleRefreshJobs}
+                disabled={refreshingJobs}
+                style={{ marginLeft: 8, opacity: refreshingJobs ? 0.5 : 1 }}
+              >
+                <Feather
+                  name="refresh-cw"
+                  size={16}
+                  color={isDark ? "#FFFFFF" : "#111827"}
+                />
+              </TouchableOpacity>
+              {refreshingJobs && (
+                <ActivityIndicator
+                  size="small"
+                  color="#6366F1"
+                  style={{ marginLeft: 4 }}
+                />
+              )}
+            </View>
+            <TouchableOpacity onPress={() => router.push("/(tabs)/explore")}>
+              <Text style={styles.seeAllLink}>See all</Text>
+            </TouchableOpacity>
+          </View>
 
           {jobRecommendations.length > 0 ? (
             <ScrollView
@@ -625,66 +678,34 @@ export default function HomeScreen() {
               showsHorizontalScrollIndicator={false}
               style={styles.horizontalScroll}
             >
-              {jobRecommendations.map((job, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={[
-                    styles.jobCard,
-                    {
-                      backgroundColor: isDark
-                        ? "rgba(31, 41, 55, 0.6)"
-                        : "rgba(255, 255, 255, 0.8)",
-                    },
-                  ]}
-                  onPress={() => openJobDetails(job)}
-                >
-                  <View style={styles.jobHeader}>
-                    <Text
-                      style={[
-                        styles.jobTitle,
-                        { color: isDark ? "#FFFFFF" : "#111827" },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {job.job_title}
-                    </Text>
-                    <Feather name="bookmark" size={20} color="#6366F1" />
-                  </View>
-                  <Text
-                    style={[
-                      styles.companyName,
-                      { color: isDark ? "#D1D5DB" : "#4B5563" },
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {job.employer_name}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.jobLocation,
-                      { color: isDark ? "#9CA3AF" : "#6B7280" },
-                    ]}
-                  >
-                    {job.job_city || "Remote"}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.jobDescription,
-                      { color: isDark ? "#D1D5DB" : "#4B5563" },
-                    ]}
-                    numberOfLines={2}
-                  >
-                    {job.job_description?.substring(0, 100)}...
-                  </Text>
+              {jobRecommendations.map((job, index) => {
+                // Create a truly unique key based on multiple factors
+                const uniqueKey = `recommendation-${job.job_id || ""}-${
+                  job.job_title?.substring(0, 5) || ""
+                }-${index}`;
 
-                  <TouchableOpacity
-                    style={styles.applyButton}
-                    onPress={() => openJobDetails(job)}
-                  >
-                    <Text style={styles.applyButtonText}>View Details</Text>
-                  </TouchableOpacity>
-                </TouchableOpacity>
-              ))}
+                return (
+                  <View key={uniqueKey} style={{ marginRight: 16 }}>
+                    <JobCard job={job} isDark={isDark} />
+                    <TouchableOpacity
+                      style={[
+                        styles.saveJobButton,
+                        {
+                          backgroundColor: isDark
+                            ? "rgba(99, 102, 241, 0.2)"
+                            : "rgba(99, 102, 241, 0.1)",
+                        },
+                      ]}
+                      onPress={() => handleSaveJob(job)}
+                    >
+                      <Feather name="bookmark" size={16} color="#6366F1" />
+                      <Text style={styles.saveJobButtonText}>
+                        Save this job
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
             </ScrollView>
           ) : (
             <View
@@ -697,79 +718,165 @@ export default function HomeScreen() {
                 },
               ]}
             >
-              <LottieView
-                source={require("@/assets/animations/search-animation.json")}
-                style={styles.searchAnimation}
-                autoPlay
-                loop
-              />
-              <Text
-                style={[
-                  styles.emptyStateText,
-                  { color: isDark ? "#D1D5DB" : "#4B5563" },
-                ]}
-              >
-                We're finding perfect jobs for you
-              </Text>
-              <TouchableOpacity
-                style={styles.emptyStateButton}
-                onPress={() => router.push("/(tabs)/explore")}
-              >
-                <Text style={styles.emptyStateButtonText}>Search Jobs Now</Text>
-              </TouchableOpacity>
+              {refreshingJobs ? (
+                <>
+                  <ActivityIndicator
+                    size="large"
+                    color="#6366F1"
+                    style={{ marginBottom: 16 }}
+                  />
+                  <Text
+                    style={[
+                      styles.emptyStateText,
+                      { color: isDark ? "#D1D5DB" : "#4B5563" },
+                    ]}
+                  >
+                    Finding jobs that match your profile...
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <LottieView
+                    source={require("@/assets/animations/search-animation.json")}
+                    style={styles.searchAnimation}
+                    autoPlay
+                    loop
+                  />
+                  <Text
+                    style={[
+                      styles.emptyStateText,
+                      { color: isDark ? "#D1D5DB" : "#4B5563" },
+                    ]}
+                  >
+                    Tap the refresh icon to find jobs matching your profile
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.emptyStateButton}
+                    onPress={handleRefreshJobs}
+                  >
+                    <Text style={styles.emptyStateButtonText}>
+                      Find Matching Jobs
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
           )}
         </View>
 
-        {/* Continue Learning */}
-        <View style={styles.learningContainer}>
-          <Text
-            style={[
-              styles.sectionTitle,
-              { color: isDark ? "#FFFFFF" : "#111827" },
-            ]}
-          >
-            Continue Learning 📚
-          </Text>
-
-          {skillSuggestions.length > 0 ? (
-            skillSuggestions.map((skill, index) => (
-              <View
-                key={index}
+        {/* Saved Jobs Section */}
+        {savedJobs.length > 0 && (
+          <View style={styles.recommendationsContainer}>
+            <View style={styles.sectionHeaderWithLink}>
+              <Text
                 style={[
-                  styles.learningCard,
-                  {
-                    backgroundColor: isDark
-                      ? "rgba(31, 41, 55, 0.6)"
-                      : "rgba(255, 255, 255, 0.8)",
-                  },
+                  styles.sectionTitle,
+                  { color: isDark ? "#FFFFFF" : "#111827" },
                 ]}
               >
-                <View style={styles.learningHeader}>
-                  <Feather name="book-open" size={20} color="#6366F1" />
-                  <Text
-                    style={[
-                      styles.learningTitle,
-                      { color: isDark ? "#FFFFFF" : "#111827" },
-                    ]}
-                  >
-                    {skill.skill}
-                  </Text>
-                </View>
-                <Text
-                  style={[
-                    styles.learningDescription,
-                    { color: isDark ? "#D1D5DB" : "#4B5563" },
-                  ]}
-                  numberOfLines={2}
+                Saved Jobs 📌
+              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <TouchableOpacity
+                  onPress={recalculateJobMatches}
+                  disabled={recalculatingMatches}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    marginRight: 12,
+                    opacity: recalculatingMatches ? 0.5 : 1,
+                  }}
                 >
-                  {skill.reason}
-                </Text>
-                <TouchableOpacity style={styles.learnMoreButton}>
-                  <Text style={styles.learnMoreButtonText}>Learn More</Text>
+                  <Feather name="refresh-cw" size={14} color="#6366F1" />
+                  <Text
+                    style={{
+                      marginLeft: 4,
+                      fontSize: 12,
+                      color: "#6366F1",
+                      fontWeight: "500",
+                    }}
+                  >
+                    Update Matches
+                  </Text>
+                  {recalculatingMatches && (
+                    <ActivityIndicator
+                      size="small"
+                      color="#6366F1"
+                      style={{ marginLeft: 4 }}
+                    />
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => router.push("/saved-jobs")}>
+                  <Text style={styles.seeAllLink}>See all</Text>
                 </TouchableOpacity>
               </View>
-            ))
+            </View>
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.horizontalScroll}
+            >
+              {savedJobs.slice(0, 3).map((job, index) => (
+                <JobCard
+                  key={`saved-${
+                    job.id || job.external_job_id || `job-${index}`
+                  }`}
+                  job={{
+                    job_id: job.external_job_id,
+                    job_title: job.job_title,
+                    employer_name: job.company_name,
+                    job_description: job.job_description,
+                    job_city: job.job_location,
+                    match_percentage:
+                      job.match_percentage !== undefined
+                        ? job.match_percentage
+                        : 85,
+                  }}
+                  isDark={isDark}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Recommended Skills (Horizontal Scroll) */}
+        <View style={styles.recommendationsContainer}>
+          <View style={styles.sectionHeaderWithLink}>
+            <Text
+              style={[
+                styles.sectionTitle,
+                { color: isDark ? "#FFFFFF" : "#111827" },
+              ]}
+            >
+              Recommended Skills 📚
+            </Text>
+            <TouchableOpacity
+              onPress={() =>
+                router.push({
+                  pathname: "/skills",
+                  params: {
+                    prompt: "What skills should I learn to advance my career?",
+                  },
+                })
+              }
+            >
+              <Text style={styles.seeAllLink}>See all</Text>
+            </TouchableOpacity>
+          </View>
+
+          {skillSuggestions.length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.horizontalScroll}
+            >
+              {skillSuggestions.map((skill, index) => (
+                <View key={index} style={styles.skillCardWrapper}>
+                  <SkillSuggestionCard skill={skill} isDark={isDark} />
+                </View>
+              ))}
+            </ScrollView>
           ) : (
             <View
               style={[
@@ -793,45 +900,6 @@ export default function HomeScreen() {
             </View>
           )}
         </View>
-
-        {/* AI Genie Prompt Box */}
-        <View style={styles.geniePromptContainer}>
-          <Text
-            style={[
-              styles.sectionTitle,
-              { color: isDark ? "#FFFFFF" : "#111827" },
-            ]}
-          >
-            Ask the Genie 🧠
-          </Text>
-          <View
-            style={[
-              styles.promptBox,
-              {
-                backgroundColor: isDark
-                  ? "rgba(31, 41, 55, 0.6)"
-                  : "rgba(255, 255, 255, 0.8)",
-              },
-            ]}
-          >
-            <TextInput
-              style={[
-                styles.promptInput,
-                { color: isDark ? "#FFFFFF" : "#111827" },
-              ]}
-              placeholder="What skills do I need for a frontend dev job?"
-              placeholderTextColor={isDark ? "#9CA3AF" : "#6B7280"}
-              value={geniePrompt}
-              onChangeText={setGeniePrompt}
-            />
-            <TouchableOpacity
-              style={styles.promptButton}
-              onPress={handleGeniePromptSubmit}
-            >
-              <Feather name="send" size={20} color="#FFFFFF" />
-            </TouchableOpacity>
-          </View>
-        </View>
       </ScrollView>
     </View>
   );
@@ -840,17 +908,6 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#F9FAFB",
-  },
-  loadingText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: "#6B7280",
   },
   header: {
     paddingHorizontal: 24,
@@ -882,6 +939,17 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "600",
     marginBottom: 16,
+  },
+  sectionHeaderWithLink: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  seeAllLink: {
+    fontSize: 14,
+    color: "#6366F1",
+    fontWeight: "500",
   },
   quickActions: {
     flexDirection: "row",
@@ -934,6 +1002,10 @@ const styles = StyleSheet.create({
   },
   horizontalScroll: {
     paddingVertical: 8,
+  },
+  skillCardWrapper: {
+    width: 280, // Match the width of JobCard for consistency
+    marginRight: 16,
   },
   jobCard: {
     borderRadius: 16,
@@ -1013,26 +1085,6 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     fontSize: 14,
   },
-  geniePromptContainer: {
-    marginBottom: 24,
-  },
-  promptBox: {
-    flexDirection: "row",
-    borderRadius: 16,
-    padding: 16,
-    alignItems: "center",
-  },
-  promptInput: {
-    flex: 1,
-    fontSize: 14,
-    paddingVertical: 8,
-  },
-  promptButton: {
-    backgroundColor: "#6366F1",
-    borderRadius: 8,
-    padding: 8,
-    marginLeft: 12,
-  },
   emptyState: {
     borderRadius: 16,
     padding: 24,
@@ -1059,88 +1111,20 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     fontSize: 14,
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
+  saveJobButton: {
+    flexDirection: "row",
+    alignItems: "center",
     justifyContent: "center",
-    alignItems: "center",
-  },
-  modalContent: {
-    width: "90%",
-    height: "80%",
-    borderRadius: 16,
-    padding: 16,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-  },
-  modalSubtitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
-  modalLocation: {
-    fontSize: 14,
-    marginBottom: 12,
-  },
-  modalDetail: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  modalDetailText: {
-    fontSize: 14,
-    marginLeft: 8,
-  },
-  modalSectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 8,
-  },
-  modalDescription: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  modalScroll: {
-    flex: 1,
-  },
-  modalFooter: {
-    marginTop: 16,
-  },
-  modalButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderRadius: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    alignItems: "center",
+    marginTop: 8,
+    width: 280,
   },
-  modalButtonText: {
-    fontWeight: "500",
-    fontSize: 16,
-  },
-  prepareOptions: {
-    marginBottom: 16,
-  },
-  prepareButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 12,
-  },
-  applyDirectButton: {
-    backgroundColor: "#6366F1",
-  },
-  prepareButtonText: {
-    marginLeft: 8,
-    fontSize: 14,
-    fontWeight: "500",
+  saveJobButtonText: {
     color: "#6366F1",
+    fontWeight: "500",
+    fontSize: 14,
+    marginLeft: 6,
   },
 });
