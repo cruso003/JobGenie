@@ -1243,3 +1243,201 @@ export async function generateSkillFeedback(
     throw error;
   }
 }
+
+/**
+ * Conduct a text-based interview session
+ */
+export interface InterviewContext {
+  type: 'behavioral' | 'technical' | 'general';
+  role: string;
+  company?: string;
+  currentQuestionIndex: number;
+  conversationHistory: { role: 'human' | 'ai'; content: string; type?: 'text' | 'code' }[];
+}
+
+export async function conductTextInterview(
+  userResponse: string,
+  context: InterviewContext
+): Promise<{ response: string; type: 'text' | 'code' | 'feedback'; isQuestion: boolean }> {
+  try {
+    const prompt = `
+      You are Job Genie, conducting a ${context.type} interview for the position of ${context.role}${context.company ? ` at ${context.company}` : ''}.
+      
+      This is question ${context.currentQuestionIndex + 1} of the interview.
+      
+      Interview history:
+      ${context.conversationHistory.map(msg => `${msg.role.toUpperCase()}: ${msg.content}`).join('\n')}
+      
+      Candidate's latest response: "${userResponse}"
+      
+      Based on the interview type and progression:
+      
+      For TECHNICAL interviews:
+      - If the question involves coding or technical implementation, ask the candidate to write code
+      - Evaluate their code for correctness, efficiency, and best practices
+      - Ask follow-up questions about their implementation
+      - Provide constructive feedback on their technical approach
+      
+      For BEHAVIORAL interviews:
+      - Focus on STAR method responses (Situation, Task, Action, Result)
+      - Ask follow-up questions to dive deeper into experiences
+      - Evaluate communication skills and professional experience
+      
+      For GENERAL interviews:
+      - Mix of professional experience, skills, and cultural fit questions
+      - Balance between technical and behavioral questions if appropriate
+      
+      Provide your response in JSON format:
+      {
+        "response": "Your response or next question here",
+        "type": "text" or "code" or "feedback",
+        "isQuestion": true/false
+      }
+      
+      Guidelines:
+      - If their answer needs clarification, ask a follow-up question
+      - If they've answered well, provide brief feedback and move to the next question
+      - If this is the final question, provide overall feedback
+      - For technical questions, specify if you want to see code implementation
+      - Keep the interview flowing naturally
+    `;
+
+    const result = await generateText(prompt, {
+      temperature: 0.5,
+      maxOutputTokens: 1024,
+    });
+
+    try {
+      return JSON.parse(result);
+    } catch (e) {
+      console.error('Failed to parse interview response:', e);
+      // Fallback response
+      return {
+        response: result,
+        type: 'text',
+        isQuestion: true
+      };
+    }
+  } catch (error) {
+    console.error('Error in conductTextInterview:', error);
+    throw error;
+  }
+}
+
+/**
+ * Generate technical interview questions that require code
+ */
+export async function generateTechnicalCodingQuestion(
+  role: string,
+  skills: string[],
+  difficulty: 'easy' | 'medium' | 'hard' = 'medium'
+): Promise<{
+  question: string;
+  expectedApproach: string;
+  sampleSolution: string;
+  evaluationCriteria: string[];
+}> {
+  try {
+    const prompt = `
+      Generate a technical coding question for a ${role} position that tests: ${skills.join(', ')}.
+      Difficulty level: ${difficulty}
+      
+      Return a JSON object with:
+      {
+        "question": "Clear problem statement with examples",
+        "expectedApproach": "The general approach or algorithm to solve this",
+        "sampleSolution": "A code solution in a common language",
+        "evaluationCriteria": ["What aspects to evaluate in the candidate's solution"]
+      }
+    `;
+
+    const result = await generateText(prompt, {
+      temperature: 0.4,
+      maxOutputTokens: 2048,
+    });
+
+    try {
+      return JSON.parse(result);
+    } catch (e) {
+      console.error('Failed to parse technical question:', e);
+      // Fallback question
+      return {
+        question: `Write a function to solve a ${difficulty} level problem related to ${skills[0]}`,
+        expectedApproach: 'Explain your approach clearly before coding',
+        sampleSolution: '// Sample solution would go here',
+        evaluationCriteria: ['Code correctness', 'Time complexity', 'Code style']
+      };
+    }
+  } catch (error) {
+    console.error('Error generating technical question:', error);
+    throw error;
+  }
+}
+
+/**
+ * Evaluate code submissions for technical interviews
+ */
+export async function evaluateCodeSubmission(
+  code: string,
+  question: string,
+  expectedApproach: string,
+  language: string
+): Promise<{
+  feedback: string;
+  score: number;
+  strengths: string[];
+  improvements: string[];
+  followUpQuestions: string[];
+}> {
+  try {
+    const prompt = `
+      Evaluate this ${language} code solution for the following problem:
+      
+      PROBLEM: ${question}
+      EXPECTED APPROACH: ${expectedApproach}
+      
+      CANDIDATE'S CODE:
+      \`\`\`${language}
+      ${code}
+      \`\`\`
+      
+      Provide a comprehensive evaluation in JSON format:
+      {
+        "feedback": "Overall assessment of the solution",
+        "score": numeric score from 1-10,
+        "strengths": ["What was done well"],
+        "improvements": ["Areas for improvement"],
+        "followUpQuestions": ["Questions to test deeper understanding"]
+      }
+      
+      Consider:
+      - Correctness of the solution
+      - Time and space complexity
+      - Code quality and best practices
+      - Edge case handling
+      - Variable naming and documentation
+    `;
+
+    const result = await generateText(prompt, {
+      temperature: 0.3,
+      maxOutputTokens: 1024,
+    });
+
+    try {
+      return JSON.parse(result);
+    } catch (e) {
+      console.error('Failed to parse code evaluation:', e);
+      // Fallback evaluation
+      return {
+        feedback: 'Your solution has been evaluated.',
+        score: 7,
+        strengths: ['Good approach to the problem'],
+        improvements: ['Consider edge cases'],
+        followUpQuestions: ['How would you optimize this solution?']
+      };
+    }
+  } catch (error) {
+    console.error('Error evaluating code submission:', error);
+    throw error;
+  }
+}

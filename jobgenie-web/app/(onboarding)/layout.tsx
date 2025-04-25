@@ -18,7 +18,7 @@ export default function OnboardingLayout({
   useEffect(() => {
     // Check if user is authenticated
     if (!isLoading && !user) {
-      router.push('/auth');
+      router.push('/login');
     }
 
     // Check if user is already onboarded
@@ -40,7 +40,7 @@ export default function OnboardingLayout({
         // If already onboarded, redirect to dashboard
         if (data?.onboarded) {
           router.push('/dashboard');
-        }
+        } 
       } catch (error) {
         console.error('Error in onboarding check:', error);
       }

@@ -1,19 +1,39 @@
-/* eslint-disable react-hooks/exhaustive-deps */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-// components/interview/CameraPreview.tsx
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Mic, MicOff } from "lucide-react";
-import { Base64 } from 'js-base64';
-import { GeminiWebSocket } from '@/lib/services/geminiWebSocket';
+import { Video, VideoOff, AlertTriangle } from "lucide-react";
+import { Base64 } from "js-base64";
+import { GeminiWebSocket } from "@/lib/services/geminiWebSocket";
+import { motion } from "framer-motion";
+import { useToast } from "../ui/use-toast";
 
 interface CameraPreviewProps {
   onTranscription: (text: string) => void;
+  onAITranscription?: (text: string) => void;
+  setWebSocketRef?: (ws: GeminiWebSocket | null) => void;
+  onTimerControl?: (shouldRun: boolean) => void;
+  onConnectionError?: (error: string) => void;
+  onStartInterview?: () => Promise<boolean>;
+  canCreateInterview?: boolean;
+  interviewContext?: {
+    type: string;
+    role: string;
+    company?: string;
+  };
 }
 
-export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
+export default function CameraPreview({
+  onTranscription,
+  onAITranscription,
+  setWebSocketRef,
+  onTimerControl,
+  onConnectionError,
+  onStartInterview,
+  canCreateInterview = true,
+  interviewContext,
+}: CameraPreviewProps) {
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -28,16 +48,12 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
   const imageIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [outputAudioLevel, setOutputAudioLevel] = useState(0);
-  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
-  const [isMuted, setIsMuted] = useState(false);
-
-  // Auto-start camera when component mounts
-  useEffect(() => {
-    startCamera();
-    return () => {
-      stopCamera();
-    };
-  }, []);
+  const [connectionStatus, setConnectionStatus] = useState<
+    "disconnected" | "connecting" | "connected" | "error"
+  >("disconnected");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [showCompressionIndicator, setShowCompressionIndicator] = useState(false);
+  const { toast } = useToast();
 
   const cleanupAudio = useCallback(() => {
     if (audioWorkletNodeRef.current) {
@@ -45,9 +61,12 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
       audioWorkletNodeRef.current = null;
     }
     if (audioContextRef.current) {
-      audioContextRef.current.close();
+      audioContextRef.current.close().catch((err) =>
+        console.error("[CameraPreview] Error closing audio context:", err)
+      );
       audioContextRef.current = null;
     }
+    setIsAudioSetup(false);
   }, []);
 
   const cleanupWebSocket = useCallback(() => {
@@ -55,131 +74,170 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
       geminiWsRef.current.disconnect();
       geminiWsRef.current = null;
     }
-  }, []);
+    setWebSocketRef?.(null);
+    setIsWebSocketReady(false);
+    setConnectionStatus("disconnected");
+    setConnectionError(null);
+    onTimerControl?.(false);
+  }, [setWebSocketRef, onTimerControl]);
 
-  // Send audio data to Gemini
-  const sendAudioData = (b64Data: string) => {
-    if (!geminiWsRef.current) return;
-    geminiWsRef.current.sendMediaChunk(b64Data, "audio/pcm");
-  };
-
-  const startCamera = async () => {
-    try {
-      // Request video stream
-      const videoStream = await navigator.mediaDevices.getUserMedia({ 
-        video: true,
-        audio: false
-      });
-
-      // Request audio stream with specific constraints for better quality
-      const audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 16000,
-          channelCount: 1
-        }
-      });
-
-      // Create audio context
-      audioContextRef.current = new AudioContext({
-        sampleRate: 16000,
-      });
-
-      // Set up video element
-      if (videoRef.current) {
-        videoRef.current.srcObject = videoStream;
-        videoRef.current.muted = true; // Important to prevent feedback
+  const sendAudioData = useCallback(
+    (b64Data: string) => {
+      if (!geminiWsRef.current || !isWebSocketReady) {
+        return;
       }
+      geminiWsRef.current.sendMediaChunk(b64Data, "audio/pcm");
+    },
+    [isWebSocketReady]
+  );
 
-      // Combine video and audio streams
-      const combinedStream = new MediaStream([
-        ...videoStream.getTracks(),
-        ...audioStream.getTracks()
-      ]);
-
-      // Set initial mute state
-      const audioTracks = combinedStream.getAudioTracks();
-      audioTracks.forEach(track => {
-        track.enabled = !isMuted;
-      });
-
-      setStream(combinedStream);
-      setIsStreaming(true);
-    } catch (err) {
-      console.error('Error accessing media devices:', err);
-      alert("Please grant camera and microphone permissions to continue with the interview.");
-      cleanupAudio();
+  const captureAndSendImage = useCallback(() => {
+    if (!videoRef.current || !videoCanvasRef.current || !geminiWsRef.current || !isWebSocketReady) {
+      return;
     }
-  };
 
-  const stopCamera = () => {
+    const canvas = videoCanvasRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+
+    context.drawImage(videoRef.current, 0, 0);
+
+    const imageData = canvas.toDataURL("image/jpeg", 0.8);
+    const b64Data = imageData.split(",")[1];
+    geminiWsRef.current.sendMediaChunk(b64Data, "image/jpeg");
+  }, [isWebSocketReady]);
+
+  const toggleCamera = useCallback(async () => {
+    
     if (isStreaming && stream) {
       setIsStreaming(false);
       cleanupWebSocket();
       cleanupAudio();
-      stream.getTracks().forEach(track => track.stop());
+      stream.getTracks().forEach((track) => track.stop());
       if (videoRef.current) {
         videoRef.current.srcObject = null;
       }
       setStream(null);
+      setConnectionStatus("disconnected");
+    } else {
+      if (canCreateInterview === false) {
+        toast({
+          title: "Interview Limit Reached",
+          description: "You've used all your free interviews this month. Upgrade to Pro for unlimited interviews.",
+          variant: "destructive",
+        });
+        return;
+      }
+      
+      if (onStartInterview) {
+        setConnectionStatus("connecting");
+        const success = await onStartInterview();
+        if (!success) {
+          setConnectionStatus("disconnected");
+          return;
+        }
+      }
+      
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+  
+        const audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: 24000,
+            channelCount: 1,
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: true,
+          },
+        });
+        audioContextRef.current = new AudioContext({
+          sampleRate: 24000,
+        });
+  
+        if (!videoRef.current) {
+          console.error("[CameraPreview] videoRef.current is null");
+          videoStream.getTracks().forEach((track) => track.stop());
+          audioStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+  
+        videoRef.current.srcObject = videoStream;
+        videoRef.current.muted = true;
+  
+        const combinedStream = new MediaStream([
+          ...videoStream.getVideoTracks(),
+          ...audioStream.getAudioTracks(),
+        ]);
+        setStream(combinedStream);
+        setIsStreaming(true);
+        setConnectionStatus("connecting");
+      } catch (err) {
+        console.error("[CameraPreview] Error accessing media devices:", err);
+        cleanupAudio();
+        setIsStreaming(false);
+        setStream(null);
+        setConnectionStatus("disconnected");
+        
+        toast({
+          title: "Camera Access Error",
+          description: "Could not access your camera or microphone. Please check your permissions.",
+          variant: "destructive",
+        });
+      }
     }
-  };
+  }, [isStreaming, stream, cleanupWebSocket, cleanupAudio, canCreateInterview, onStartInterview, toast]);
 
-  const toggleMute = () => {
-    if (stream) {
-      const audioTracks = stream.getAudioTracks();
-      audioTracks.forEach(track => {
-        track.enabled = isMuted; // Toggle enabled state
-      });
-      setIsMuted(!isMuted);
-    }
-  };
-
-  // Initialize WebSocket connection
   useEffect(() => {
-    if (!isStreaming) {
-      setConnectionStatus('disconnected');
+    if (!isStreaming || !stream) {
       return;
     }
 
-    setConnectionStatus('connecting');
-    
-    // Set up the WebSocket with specialized system prompt for interviews
-    const systemPrompt = `
-    You are an AI-powered interview coach for a job interview simulation. 
-    Your goal is to help the user practice for a job interview by acting as the interviewer.
-    
-    Follow these guidelines:
-    1. Ask relevant job interview questions one at a time.
-    2. Listen to the user's answers and respond naturally.
-    3. Provide constructive feedback on their answers, focusing on content, delivery, and body language.
-    4. Be encouraging but honest in your assessment.
-    5. Adapt your questions based on the user's answers and experience level.
-    6. When you see the user is ready, move on to the next question.
-    7. At the end, summarize their overall performance.
-    
-    Remember, you can see and hear the user, so refer to their verbal and visual cues in your feedback.
-    `;
-    
+    const handleTextReceived = (text: string) => {
+      if (onAITranscription && text && text.trim()) {
+        onAITranscription(text);
+      }
+    };
+
+    const handleReady = () => {
+      setIsWebSocketReady(true);
+      setConnectionStatus("connected");
+      onTimerControl?.(true);
+      if (geminiWsRef.current) {
+        setWebSocketRef?.(geminiWsRef.current);
+      }
+    };
+
+    const handleSpeakingStateChange = (isPlaying: boolean) => {
+      setIsModelSpeaking(isPlaying);
+    };
+
+    const handleAudioLevelChange = (level: number) => {
+      setOutputAudioLevel(level);
+    };
+
+    const handleError = (error: string) => {
+      setIsWebSocketReady(false);
+      setConnectionStatus("error");
+      setConnectionError(error);
+      onConnectionError?.(error);
+      onTimerControl?.(false);
+    };
+
     geminiWsRef.current = new GeminiWebSocket(
-      (text) => {
-        console.log("Received from Gemini:", text);
-      },
-      () => {
-        console.log("[Camera] WebSocket setup complete, starting media capture");
-        geminiWsRef.current?.sendTextMessage(systemPrompt);
-        setIsWebSocketReady(true);
-        setConnectionStatus('connected');
-      },
-      (isPlaying) => {
-        setIsModelSpeaking(isPlaying);
-      },
-      (level) => {
-        setOutputAudioLevel(level);
-      },
-      onTranscription
+      handleTextReceived,
+      handleReady,
+      handleSpeakingStateChange,
+      handleAudioLevelChange,
+      onTranscription,
+      handleError,
+      interviewContext
     );
     geminiWsRef.current.connect();
 
@@ -189,16 +247,14 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
         imageIntervalRef.current = null;
       }
       cleanupWebSocket();
-      setIsWebSocketReady(false);
-      setConnectionStatus('disconnected');
     };
-  }, [isStreaming, onTranscription, cleanupWebSocket]);
+  }, [isStreaming, stream, onTranscription, onAITranscription, cleanupWebSocket, setWebSocketRef, onTimerControl, onConnectionError]);
 
-  // Start image capture only after WebSocket is ready
   useEffect(() => {
-    if (!isStreaming || !isWebSocketReady) return;
+    if (!isStreaming || !stream || !isWebSocketReady) {
+      return;
+    }
 
-    console.log("[Camera] Starting image capture interval");
     imageIntervalRef.current = setInterval(captureAndSendImage, 1000);
 
     return () => {
@@ -207,12 +263,19 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
         imageIntervalRef.current = null;
       }
     };
-  }, [isStreaming, isWebSocketReady]);
+  }, [isStreaming, stream, isWebSocketReady, captureAndSendImage]);
 
-  // Update audio processing setup
   useEffect(() => {
-    if (!isStreaming || !stream || !audioContextRef.current || 
-        !isWebSocketReady || isAudioSetup || setupInProgressRef.current) return;
+    if (
+      !isStreaming ||
+      !stream ||
+      !audioContextRef.current ||
+      !isWebSocketReady ||
+      isAudioSetup ||
+      setupInProgressRef.current
+    ) {
+      return;
+    }
 
     let isActive = true;
     setupInProgressRef.current = true;
@@ -220,57 +283,50 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
     const setupAudioProcessing = async () => {
       try {
         const ctx = audioContextRef.current;
-        if (!ctx || ctx.state === 'closed' || !isActive) {
+        if (!ctx || ctx.state === "closed" || !isActive) {
           setupInProgressRef.current = false;
           return;
         }
 
-        if (ctx.state === 'suspended') {
+        if (ctx.state === "suspended") {
           await ctx.resume();
         }
 
-        await ctx.audioWorklet.addModule('/worklets/audio-processor.js');
+        await ctx.audioWorklet.addModule("/worklets/audio-processor.js");
 
         if (!isActive) {
           setupInProgressRef.current = false;
           return;
         }
 
-        audioWorkletNodeRef.current = new AudioWorkletNode(ctx, 'audio-processor', {
+        audioWorkletNodeRef.current = new AudioWorkletNode(ctx, "audio-processor", {
           numberOfInputs: 1,
           numberOfOutputs: 1,
           processorOptions: {
-            sampleRate: 16000,
+            sampleRate: 24000,
             bufferSize: 4096,
           },
           channelCount: 1,
-          channelCountMode: 'explicit',
-          channelInterpretation: 'speakers'
+          channelCountMode: "explicit",
+          channelInterpretation: "speakers",
         });
 
-        const source = ctx.createMediaStreamSource(stream);
         audioWorkletNodeRef.current.port.onmessage = (event) => {
-          if (!isActive || isModelSpeaking || isMuted) return;
+          if (!isActive || isModelSpeaking) return;
           const { pcmData, level } = event.data;
-          setAudioLevel(level);
+          setAudioLevel(level * 100);
 
           const pcmArray = new Uint8Array(pcmData);
           const b64Data = Base64.fromUint8Array(pcmArray);
           sendAudioData(b64Data);
         };
 
+        const source = ctx.createMediaStreamSource(stream);
         source.connect(audioWorkletNodeRef.current);
         setIsAudioSetup(true);
         setupInProgressRef.current = false;
-
-        return () => {
-          source.disconnect();
-          if (audioWorkletNodeRef.current) {
-            audioWorkletNodeRef.current.disconnect();
-          }
-          setIsAudioSetup(false);
-        };
       } catch (error) {
+        console.error("[CameraPreview] Error setting up audio processing:", error);
         if (isActive) {
           cleanupAudio();
           setIsAudioSetup(false);
@@ -279,7 +335,6 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
       }
     };
 
-    console.log("[Camera] Starting audio processing setup");
     setupAudioProcessing();
 
     return () => {
@@ -291,28 +346,21 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
         audioWorkletNodeRef.current = null;
       }
     };
-  }, [isStreaming, stream, isWebSocketReady, isModelSpeaking, isMuted]);
+  }, [isStreaming, stream, isWebSocketReady, isModelSpeaking, sendAudioData, cleanupAudio]);
 
-  // Capture and send image
-  const captureAndSendImage = () => {
-    if (!videoRef.current || !videoCanvasRef.current || !geminiWsRef.current) return;
-
-    const canvas = videoCanvasRef.current;
-    const context = canvas.getContext('2d');
-    if (!context) return;
-
-    // Set canvas size to match video
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-
-    // Draw video frame to canvas
-    context.drawImage(videoRef.current, 0, 0);
-
-    // Convert to base64 and send
-    const imageData = canvas.toDataURL('image/jpeg', 0.8);
-    const b64Data = imageData.split(',')[1];
-    geminiWsRef.current.sendMediaChunk(b64Data, "image/jpeg");
-  };
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (geminiWsRef.current && isWebSocketReady) {
+        const now = Date.now();
+        const compressionInterval = 300000;
+        if ((now - geminiWsRef.current.getSessionStartTime()) % compressionInterval < 1000) {
+          setShowCompressionIndicator(true);
+          setTimeout(() => setShowCompressionIndicator(false), 2000);
+        }
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isWebSocketReady]);
 
   return (
     <div className="space-y-4">
@@ -321,50 +369,77 @@ export default function CameraPreview({ onTranscription }: CameraPreviewProps) {
           ref={videoRef}
           autoPlay
           playsInline
-          className="w-full h-[360px] bg-muted rounded-lg overflow-hidden object-cover"
+          muted
+          className="w-[640px] h-[480px] bg-black rounded-lg overflow-hidden"
         />
-        
-        {/* Connection Status Overlay */}
-        {isStreaming && connectionStatus !== 'connected' && (
+        {isStreaming && connectionStatus !== "connected" && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center rounded-lg backdrop-blur-sm">
             <div className="text-center space-y-2">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto" />
-              <p className="text-white font-medium">
-                {connectionStatus === 'connecting' ? 'Connecting to Gemini...' : 'Disconnected'}
-              </p>
-              <p className="text-white/70 text-sm">
-                Please wait while we establish a secure connection
-              </p>
+              {connectionStatus === "error" ? (
+                <>
+                  <AlertTriangle className="h-8 w-8 text-red-500 mx-auto" />
+                  <p className="text-white font-medium">Connection Error</p>
+                  <p className="text-white/70 text-sm max-w-xs">
+                    {connectionError || "Unable to connect to the interview service."}
+                  </p>
+                  <Button
+                    variant="outline"
+                    className="mt-2 text-white border-white/50 hover:bg-white/10"
+                    onClick={toggleCamera}
+                  >
+                    Try Again
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto" />
+                  <p className="text-white font-medium">
+                    {connectionStatus === "connecting" ? "Connecting..." : "Disconnected"}
+                  </p>
+                  <p className="text-white/70 text-sm">Please wait while we set up the session</p>
+                </>
+              )}
             </div>
           </div>
         )}
-
-        {/* Camera Controls */}
-        <div className="absolute bottom-4 left-0 right-0 flex justify-center space-x-6">
-          <Button
-            onClick={toggleMute}
-            size="icon"
-            className="rounded-full w-12 h-12 bg-black/50 hover:bg-black/70 text-white"
+        {showCompressionIndicator && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="absolute top-4 right-4 bg-blue-500/80 text-white px-3 py-1 rounded-full text-sm backdrop-blur-sm"
           >
-            {isMuted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-          </Button>
-        </div>
+            Optimizing session...
+          </motion.div>
+        )}
+        <Button
+          onClick={toggleCamera}
+          size="icon"
+          className={`absolute left-1/2 bottom-4 -translate-x-1/2 rounded-full w-12 h-12 backdrop-blur-sm transition-colors
+            ${
+              isStreaming
+                ? "bg-red-500/50 hover:bg-red-500/70 text-white"
+                : "bg-green-500/50 hover:bg-green-500/70 text-white"
+            }`}
+        >
+          {isStreaming ? (
+            <VideoOff className="h-6 w-6" />
+          ) : (
+            <Video className="h-6 w-6" />
+          )}
+        </Button>
       </div>
-      
-      {/* Audio level indicator */}
-      {isStreaming && (
-        <div className="w-full h-2 rounded-full bg-gray-200 dark:bg-gray-700">
+      {isStreaming && connectionStatus === "connected" && (
+        <div className="w-[640px] h-2 rounded-full bg-green-100">
           <div
             className="h-full rounded-full transition-all bg-green-500"
-            style={{ 
+            style={{
               width: `${isModelSpeaking ? outputAudioLevel : audioLevel}%`,
-              transition: 'width 100ms ease-out'
+              transition: "width 100ms ease-out",
             }}
           />
         </div>
       )}
-      
-      {/* Hidden canvas for image capturing */}
       <canvas ref={videoCanvasRef} className="hidden" />
     </div>
   );

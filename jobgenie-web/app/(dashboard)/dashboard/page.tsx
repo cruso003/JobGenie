@@ -109,7 +109,7 @@ export default function DashboardPage() {
           <CardContent>
             <div className="text-2xl font-bold">{stats.interviews}</div>
             <p className="text-xs text-muted-foreground">
-              Upcoming this week
+              Interview Practiced this week
             </p>
           </CardContent>
         </Card>

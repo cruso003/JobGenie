@@ -1,10 +1,13 @@
+// lib/stores/auth.ts
 import { create } from 'zustand';
 import { supabase } from '../supabase';
 import { AuthError } from '@supabase/supabase-js';
+import { UserSubscription } from '../supabase/interview';
 
 interface User {
   id: string;
   email: string;
+  subscription?: UserSubscription | null;
 }
 
 interface AuthState {
@@ -16,11 +19,12 @@ interface AuthState {
   signUp: (email: string, password: string, name?: string) => Promise<void>;
   signOut: () => Promise<void>;
   checkAuth: () => Promise<void>;
+  refreshUserSubscription: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
-  isLoading: true,
+  isLoading: false,
   error: null,
 
   checkAuth: async () => {
@@ -31,10 +35,19 @@ export const useAuthStore = create<AuthState>((set) => ({
       if (error) throw error;
       
       if (data?.session) {
+        // Get subscription info
+        const { data: subData } = await supabase
+          .from('user_subscriptions')
+          .select('*')
+          .eq('user_id', data.session.user.id)
+          .eq('status', 'active')
+          .single();
+        
         set({ 
           user: {
             id: data.session.user.id,
             email: data.session.user.email || '',
+            subscription: subData as UserSubscription || null,
           },
           isLoading: false,
         });
@@ -59,10 +72,19 @@ export const useAuthStore = create<AuthState>((set) => ({
 
       if (error) throw error;
 
+      // Get subscription info
+      const { data: subData } = await supabase
+        .from('user_subscriptions')
+        .select('*')
+        .eq('user_id', data.user.id)
+        .eq('status', 'active')
+        .single();
+
       set({ 
         user: {
           id: data.user.id,
           email: data.user.email || '',
+          subscription: subData as UserSubscription || null,
         },
         isLoading: false,
       });
@@ -94,10 +116,22 @@ export const useAuthStore = create<AuthState>((set) => ({
   
       // If no email verification, user is already authenticated
       if (data.user) {
+        // Create a free subscription for the new user
+        const { data: subData } = await supabase
+          .from('user_subscriptions')
+          .insert([{
+            user_id: data.user.id,
+            subscription_type: 'free',
+            status: 'active',
+          }])
+          .select()
+          .single();
+
         set({ 
           user: {
             id: data.user.id,
             email: data.user.email || '',
+            subscription: subData as UserSubscription || null,
           },
           isLoading: false 
         });
@@ -124,6 +158,29 @@ export const useAuthStore = create<AuthState>((set) => ({
         error: error instanceof AuthError ? error.message : 'An unknown error occurred', 
         isLoading: false 
       });
+    }
+  },
+
+  refreshUserSubscription: async () => {
+    const user = get().user;
+    if (!user) return;
+    
+    try {
+      const { data: subData } = await supabase
+        .from('user_subscriptions')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('status', 'active')
+        .single();
+      
+      set({ 
+        user: {
+          ...user,
+          subscription: subData as UserSubscription || null,
+        }
+      });
+    } catch (error) {
+      console.error('Error refreshing subscription:', error);
     }
   },
 }));

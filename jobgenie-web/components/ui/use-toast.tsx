@@ -1,43 +1,27 @@
 // components/ui/use-toast.tsx
 "use client";
 
-import { createContext, useContext, useState } from "react";
-import { Toaster as Sonner } from "sonner";
+import { createContext, useContext } from "react";
+import { toast as sonnerToast, Toaster as Sonner } from "sonner";
 
 type ToastProps = React.ComponentProps<typeof Sonner>;
+type ToastActionElement = React.ReactNode;
 
-const ToastContext = createContext<{
-  toast: (props: { title?: string; description?: string; variant?: "default" | "destructive" }) => void;
-}>({
-  toast: () => {},
-});
+const ToastContext = createContext({ toast: sonnerToast });
+
+interface ToastOptions {
+  title?: string;
+  description?: string;
+  variant?: "default" | "destructive";
+  action?: ToastActionElement;
+}
 
 export function ToastProvider({
   children,
   ...props
 }: ToastProps & { children: React.ReactNode }) {
-  const [, setToasts] = useState<Array<{ id: string; title?: string; description?: string; variant?: "default" | "destructive" }>>([]);
-
-  const toast = ({
-    title,
-    description,
-    variant = "default",
-  }: {
-    title?: string;
-    description?: string;
-    variant?: "default" | "destructive";
-  }) => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, title, description, variant }]);
-    
-    // Auto-remove toast after 5 seconds
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
-  };
-
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={{ toast: sonnerToast }}>
       {children}
       <Sonner
         className="toaster group"
@@ -70,5 +54,19 @@ export function useToast() {
     throw new Error("useToast must be used within a ToastProvider");
   }
   
-  return context;
+  return {
+    toast: ({ title, description, variant, action }: ToastOptions) => {
+      if (variant === "destructive") {
+        return context.toast.error(title, {
+          description,
+          action,
+        });
+      }
+      
+      return context.toast(title || "", {
+        description,
+        action,
+      });
+    },
+  };
 }
