@@ -1,4 +1,5 @@
 // app/dashboard/documents/page.tsx
+"use client";
 import { checkDocumentLimits, DocumentLimitStatus, incrementDocumentUsage } from "@/lib/supabase/documents";
 import { DocumentLimitBanner } from "@/components/documents/DocumentLimitBanner";
 import { useEffect, useState } from "react";
