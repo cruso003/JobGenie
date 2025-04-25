@@ -49,9 +49,9 @@ export default function OnboardingLayout({
     checkOnboardingStatus();
   }, [user, isLoading, router]);
 
-  if (isLoading) {
+  /* if (isLoading) {
     return <LoadingIndicator message="Preparing your onboarding..." />;
-  }
+  } */
 
   // Only render children if authenticated
   return user ? children : null;
