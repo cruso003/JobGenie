@@ -54,9 +54,9 @@ export default function DashboardLayout({
     }
   }, [user, router]);
 
-  if (isLoading || !profileChecked) {
+  /* if (isLoading || !profileChecked) {
     return <LoadingIndicator message="Preparing your dashboard..." />;
-  }
+  } */
 
   if (!user) {
     router.push('/login');
