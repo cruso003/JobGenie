@@ -21,6 +21,13 @@ export default function DashboardLayout({
     checkAuth();
   }, [checkAuth]);
 
+  // Handle authentication redirect
+  useEffect(() => {
+    if (!isLoading && !user) {
+      router.push('/login');
+    }
+  }, [user, isLoading, router]);
+
   useEffect(() => {
     // Check if user is onboarded
     const checkOnboardingStatus = async () => {
@@ -54,13 +61,9 @@ export default function DashboardLayout({
     }
   }, [user, router]);
 
-  /* if (isLoading || !profileChecked) {
+  // Show loading state while checking auth and profile
+  if (isLoading || (!user && !isLoading)) {
     return <LoadingIndicator message="Preparing your dashboard..." />;
-  } */
-
-  if (!user) {
-    router.push('/login');
-    return null;
   }
 
   return (
